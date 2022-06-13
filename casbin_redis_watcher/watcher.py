@@ -2,16 +2,23 @@ import logging
 import time
 from multiprocessing import Process, Pipe
 
+import redis
 from redis import Redis
 
 REDIS_CHANNEL_NAME = "casbin-role-watcher"
+logging.basicConfig()
 logger = logging.getLogger()
+
+
+def get_redis(redis_url, redis_port):
+    r = Redis(redis_url, redis_port)
+    return r
 
 
 def redis_casbin_subscription(redis_url, process_conn, redis_port=None, delay=0):
     # in case we want to delay connecting to redis (redis connection failure)
     time.sleep(delay)
-    r = Redis(redis_url, redis_port)
+    r = redis.Redis(redis_url, redis_port)
     p = r.pubsub()
     p.subscribe(REDIS_CHANNEL_NAME)
     logger.info("Waiting for casbin policy updates...")
@@ -21,24 +28,21 @@ def redis_casbin_subscription(redis_url, process_conn, redis_port=None, delay=0)
             message = p.get_message(timeout=20)
         except Exception as e:
             logger.error(
-                "Casbin watcher failed to get message from redis due to: {}".format(
-                    repr(e)
-                )
+                "Casbin watcher failed to get message from redis due to: %s", repr(e)
             )
             p.close()
             r = None
             break
 
         if message and message.get("type") == "message":
-            logger.info(
-                "Casbin policy update identified.." " Message was: {}".format(message)
-            )
+            logger.info("Casbin policy update identified.." " Message was: %s", message)
             try:
                 process_conn.send(message)
             except Exception as e:
                 logger.error(
                     "Casbin watcher failed sending update to piped"
-                    " process due to: {}".format(repr(e))
+                    " process due to: %s",
+                    repr(e),
                 )
                 p.close()
                 r = None
@@ -52,6 +56,8 @@ class RedisWatcher(object):
         self.subscribed_process, self.parent_conn = self.create_subscriber_process(
             start_process
         )
+
+        self.pool = redis.ConnectionPool(host=redis_host, port=redis_port)
 
     def create_subscriber_process(self, start_process=True, delay=0):
         parent_conn, child_conn = Pipe()
@@ -71,10 +77,9 @@ class RedisWatcher(object):
         logger.info("callback called because casbin role updated")
 
     def update(self):
-        r = Redis(self.redis_url, self.redis_port)
-        r.publish(
-            REDIS_CHANNEL_NAME, "casbin policy" " updated at {}".format(time.time())
-        )
+        r = redis.Redis(connection_pool=self.pool)
+        res = r.publish(REDIS_CHANNEL_NAME, f"casbin policy updated at {time.time()}")
+        logger.info("Message received by %s clients", res)
 
     def should_reload(self):
         try:
@@ -83,7 +88,7 @@ class RedisWatcher(object):
                 return True
         except EOFError:
             logger.error(
-                "Child casbin-watcher subscribe prococess has stopped, "
+                "Child casbin-watcher subscribe process has stopped, "
                 "attempting to recreate the process in 10 seconds..."
             )
             self.subscribed_process, self.parent_conn = self.create_subscriber_process(
