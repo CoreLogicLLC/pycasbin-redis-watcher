@@ -6,7 +6,8 @@ import redis
 from redis import Redis
 
 REDIS_CHANNEL_NAME = "casbin-role-watcher"
-logging.basicConfig()
+
+
 logger = logging.getLogger()
 
 
